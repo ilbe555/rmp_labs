@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'dart:math';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 void main() {
   runApp(const MyApp());
@@ -26,7 +29,7 @@ class Statistics {
   int totalFlips = 0;
   int heads = 0;
   int tails = 0;
-  List<String> lastResults = []; // Теперь хранит строки с результатами всех монет за бросок
+  List<String> lastResults = [];
 
   void addBatchResult(List<String> results) {
     totalFlips += results.length;
@@ -38,12 +41,13 @@ class Statistics {
       }
     }
     
-    // Формируем строку с результатами всех монет за один бросок
     String batchResult = results.join(' · ');
     lastResults.insert(0, batchResult);
     if (lastResults.length > 5) {
       lastResults.removeLast();
     }
+    
+    _saveToPreferences();
   }
 
   void reset() {
@@ -51,10 +55,42 @@ class Statistics {
     heads = 0;
     tails = 0;
     lastResults.clear();
+    _saveToPreferences();
   }
 
   double get headsPercentage => totalFlips > 0 ? (heads / totalFlips * 100) : 0;
   double get tailsPercentage => totalFlips > 0 ? (tails / totalFlips * 100) : 0;
+
+  Future<void> loadFromPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    totalFlips = prefs.getInt('totalFlips') ?? 0;
+    heads = prefs.getInt('heads') ?? 0;
+    tails = prefs.getInt('tails') ?? 0;
+    
+    List<String>? savedResults = prefs.getStringList('lastResults');
+    if (savedResults != null) {
+      lastResults = savedResults;
+    }
+  }
+
+  Future<void> _saveToPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    await prefs.setInt('totalFlips', totalFlips);
+    await prefs.setInt('heads', heads);
+    await prefs.setInt('tails', tails);
+    await prefs.setStringList('lastResults', lastResults);
+  }
+}
+
+// Модель для предсказания
+class Prediction {
+  String text;
+  bool isLoading;
+  String? error;
+
+  Prediction({this.text = 'Нажмите кнопку для предсказания', this.isLoading = false, this.error});
 }
 
 // Главный экран
@@ -70,7 +106,58 @@ class _MainScreenState extends State<MainScreen> {
   List<String> coinResults = ['решка'];
   bool isFlipping = false;
   final Random _random = Random();
-  Statistics statistics = Statistics();
+  late Statistics statistics;
+  bool _isLoading = true;
+  
+  // Для API предсказаний
+  Prediction prediction = Prediction();
+
+  @override
+  void initState() {
+    super.initState();
+    statistics = Statistics();
+    _loadStatistics();
+  }
+
+  Future<void> _loadStatistics() async {
+    await statistics.loadFromPreferences();
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  // Метод для получения предсказания из API
+  Future<void> getPrediction() async {
+    setState(() {
+      prediction.isLoading = true;
+      prediction.error = null;
+    });
+
+    try {
+      // Используем бесплатное API советов
+      final response = await http.get(
+        Uri.parse('https://api.adviceslip.com/advice'),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        setState(() {
+          prediction.text = data['slip']['advice'];
+          prediction.isLoading = false;
+        });
+      } else {
+        throw Exception('Ошибка загрузки');
+      }
+    } catch (e) {
+      setState(() {
+        prediction.error = 'Не удалось получить предсказание';
+        prediction.isLoading = false;
+        prediction.text = 'Попробуйте позже';
+      });
+    }
+  }
 
   void incrementCoins() {
     if (coinCount < 3) {
@@ -97,15 +184,13 @@ class _MainScreenState extends State<MainScreen> {
       isFlipping = true;
     });
 
-    int flipCount = _random.nextInt(6) + 10; // от 10 до 15
+    int flipCount = _random.nextInt(6) + 10;
     
-    // Анимация переключения изображений
     for (int i = 0; i < flipCount; i++) {
-      await Future.delayed(Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 100));
       
       if (mounted) {
         setState(() {
-          // Визуальное переключение для каждой монеты
           for (int j = 0; j < coinCount; j++) {
             coinResults[j] = _random.nextBool() ? 'орёл' : 'решка';
           }
@@ -113,14 +198,12 @@ class _MainScreenState extends State<MainScreen> {
       }
     }
 
-    // Финальный результат для каждой монеты
     List<String> finalResults = [];
     for (int i = 0; i < coinCount; i++) {
       String result = _random.nextBool() ? 'орёл' : 'решка';
       finalResults.add(result);
     }
     
-    // Добавляем все результаты как один бросок
     statistics.addBatchResult(finalResults);
 
     if (mounted) {
@@ -135,9 +218,8 @@ class _MainScreenState extends State<MainScreen> {
     double size = coinCount == 1 ? 150.0 : (coinCount == 2 ? 100.0 : 80.0);
     double horizontalPosition = 0.0;
     
-    // Рассчитываем позицию для каждой монеты (смещаем чуть левее для центрирования)
     double screenWidth = MediaQuery.of(context).size.width;
-    double startPosition = screenWidth / 2 - size / 2 - 10; // Смещение влево на 10px
+    double startPosition = screenWidth / 2 - size / 2 - 10; 
     
     if (coinCount == 1) {
       horizontalPosition = startPosition;
@@ -146,9 +228,13 @@ class _MainScreenState extends State<MainScreen> {
           ? startPosition - 60 
           : startPosition + 60;
     } else if (coinCount == 3) {
-      if (index == 0) horizontalPosition = startPosition - 90;
-      else if (index == 1) horizontalPosition = startPosition;
-      else horizontalPosition = startPosition + 90;
+      if (index == 0) {
+        horizontalPosition = startPosition - 90;
+      } else if (index == 1) {
+        horizontalPosition = startPosition;
+      } else {
+        horizontalPosition = startPosition + 90;
+      }
     }
 
     return Positioned(
@@ -210,13 +296,21 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Scaffold(
+        body: Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Подбрасывание монетки'),
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
       ),
-      body: Center(
+      body: SingleChildScrollView(
         child: Padding(
           padding: const EdgeInsets.all(20.0),
           child: Column(
@@ -324,6 +418,76 @@ class _MainScreenState extends State<MainScreen> {
               
               const SizedBox(height: 30),
               
+              // НОВЫЙ БЛОК: Предсказание дня из API
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.purple.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(15),
+                  border: Border.all(color: Colors.purple, width: 2),
+                ),
+                child: Column(
+                  children: [
+                    const Text(
+                      '🌟 ПРЕДСКАЗАНИЕ ДНЯ 🌟',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.purple,
+                      ),
+                    ),
+                    const SizedBox(height: 15),
+                    
+                    // Отображение предсказания или загрузки/ошибки
+                    if (prediction.isLoading)
+                      const CircularProgressIndicator()
+                    else if (prediction.error != null)
+                      Text(
+                        prediction.error!,
+                        style: const TextStyle(color: Colors.red),
+                      )
+                    else
+                      Container(
+                        padding: const EdgeInsets.all(15),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(10),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.grey.withOpacity(0.3),
+                              blurRadius: 5,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Text(
+                          '"${prediction.text}"',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ),
+                    
+                    const SizedBox(height: 15),
+                    
+                    // Кнопка получения предсказания
+                    ElevatedButton.icon(
+                      onPressed: prediction.isLoading ? null : getPrediction,
+                      icon: const Icon(Icons.auto_awesome),
+                      label: const Text('Получить предсказание'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.purple,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              
+              const SizedBox(height: 20),
+              
               // Кнопка перехода на статистику
               ElevatedButton(
                 onPressed: () {
@@ -352,7 +516,7 @@ class _MainScreenState extends State<MainScreen> {
   }
 }
 
-// Экран статистики
+// Экран статистики (без изменений)
 class StatsScreen extends StatefulWidget {
   final Statistics statistics;
 
@@ -384,7 +548,6 @@ class _StatsScreenState extends State<StatsScreen> {
               
               const SizedBox(height: 30),
               
-              // Поля статистики
               Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
@@ -418,7 +581,6 @@ class _StatsScreenState extends State<StatsScreen> {
               
               const SizedBox(height: 30),
               
-              // Последние броски
               const Text(
                 'Последние броски:',
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
@@ -449,7 +611,6 @@ class _StatsScreenState extends State<StatsScreen> {
               
               const SizedBox(height: 30),
               
-              // Кнопка сброса
               ElevatedButton(
                 onPressed: () {
                   setState(() {
@@ -469,7 +630,6 @@ class _StatsScreenState extends State<StatsScreen> {
               
               const SizedBox(height: 20),
               
-              // Кнопка возврата на главный экран
               ElevatedButton(
                 onPressed: () {
                   Navigator.pop(context);
